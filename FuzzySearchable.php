@@ -57,80 +57,79 @@ trait FuzzySearchable
         // 1. Exact matches (highest priority)
         foreach ($columns as $column) {
             $subqueries[] = "
-                SELECT t.*, 1 as priority, 1 as quality
+                SELECT t.*, 1 as priority, 1 as quality, {$column} as sorted_column
                 FROM ($baseQuerySql) AS t
-                WHERE LOWER($column) LIKE ?
+                WHERE LOWER($column) = ?
             ";
-            $bindings = array_merge($bindings, $baseQueryBindings, ['%' . $searchTerm . '%']);
+            $bindings = array_merge($bindings, $baseQueryBindings, [$searchTerm]);
         }
 
         // 2. Start of word matches
         foreach ($columns as $column) {
             $subqueries[] = "
-                SELECT t.*, 2 as priority, 1 as quality
+                SELECT t.*, 2 as priority, 2 as quality, {$column} as sorted_column
                 FROM ($baseQuerySql) AS t
                 WHERE LOWER($column) LIKE ?
+                AND LOWER($column) != ?
             ";
-            $bindings = array_merge($bindings, $baseQueryBindings, [$searchTerm . '%']);
+            $bindings = array_merge($bindings, $baseQueryBindings, [$searchTerm . '%', $searchTerm]);
         }
 
-        // 3. End of word matches
+        // 3. Word boundary matches
         foreach ($columns as $column) {
             $subqueries[] = "
-                SELECT t.*, 2 as priority, 2 as quality
+                SELECT t.*, 3 as priority, 3 as quality, {$column} as sorted_column
                 FROM ($baseQuerySql) AS t
-                WHERE LOWER($column) LIKE ?
-            ";
-            $bindings = array_merge($bindings, $baseQueryBindings, ['%' . $searchTerm]);
-        }
-
-        // 4. Word boundary matches
-        foreach ($columns as $column) {
-            $subqueries[] = "
-                SELECT t.*, 2 as priority, 3 as quality
-                FROM ($baseQuerySql) AS t
-                WHERE LOWER($column) LIKE ? OR LOWER($column) LIKE ? OR LOWER($column) LIKE ?
+                WHERE (
+                    LOWER($column) LIKE ? OR 
+                    LOWER($column) LIKE ? OR 
+                    LOWER($column) LIKE ? OR 
+                    LOWER($column) LIKE ?
+                )
+                AND LOWER($column) NOT LIKE ?
             ";
             $bindings = array_merge(
                 $bindings,
                 $baseQueryBindings,
                 [
-                    '% ' . $searchTerm . ' %',  // Space-bounded
-                    '% ' . $searchTerm . '%',   // Space before
-                    '%' . $searchTerm . ' %'    // Space after
+                    '% ' . $searchTerm . ' %',   // Space-bounded
+                    '% ' . $searchTerm . '%',    // Space before
+                    '%' . $searchTerm . ' %',    // Space after
+                    $searchTerm . '%',           // Starts with
+                    $searchTerm                  // Exact match
                 ]
             );
         }
 
-        // 5. Permutation matches
-        if (!empty($permutations)) {
-            foreach ($columns as $column) {
-                $conditions = [];
-                $permBindings = [];
-
-                foreach ($permutations as $perm) {
-                    $conditions[] = "LOWER($column) LIKE ?";
-                    $permBindings[] = '%' . $perm . '%';
-                }
-
-                if (!empty($conditions)) {
-                    $subqueries[] = "
-                        SELECT t.*, 3 as priority, 1 as quality
-                        FROM ($baseQuerySql) AS t
-                        WHERE " . implode(' OR ', $conditions);
-                    $bindings = array_merge($bindings, $baseQueryBindings, $permBindings);
-                }
-            }
-        }
-
-        // 6. Soundex matches (if possible)
+        // 4. Contains search term anywhere
         foreach ($columns as $column) {
             $subqueries[] = "
-                SELECT t.*, 3 as priority, 2 as quality
+                SELECT t.*, 4 as priority, 4 as quality, {$column} as sorted_column
+                FROM ($baseQuerySql) AS t
+                WHERE LOWER($column) LIKE ?
+                AND LOWER($column) NOT LIKE ?
+                AND LOWER($column) NOT LIKE ?
+            ";
+            $bindings = array_merge(
+                $bindings,
+                $baseQueryBindings,
+                [
+                    '%' . $searchTerm . '%',     // Contains anywhere
+                    $searchTerm . '%',           // Starts with
+                    $searchTerm                  // Exact match
+                ]
+            );
+        }
+
+        // 5. Soundex matches
+        foreach ($columns as $column) {
+            $subqueries[] = "
+                SELECT t.*, 5 as priority, 5 as quality, {$column} as sorted_column
                 FROM ($baseQuerySql) AS t
                 WHERE SOUNDEX($column) = SOUNDEX(?)
+                AND LOWER($column) NOT LIKE ?
             ";
-            $bindings = array_merge($bindings, $baseQueryBindings, [$searchTerm]);
+            $bindings = array_merge($bindings, $baseQueryBindings, [$searchTerm, '%' . $searchTerm . '%']);
         }
 
         // Get column names for the main query
@@ -144,13 +143,13 @@ trait FuzzySearchable
             SELECT DISTINCT 
                 " . implode(', ', $tableColumns) . ",
                 MIN(priority) as search_priority,
-                MIN(quality) as match_quality
+                MIN(quality) as match_quality,
+                MIN(sorted_column) as sort_name
             FROM matched_results
             GROUP BY " . implode(', ', $tableColumns) . "
             ORDER BY 
                 search_priority ASC,
-                match_quality ASC,
-                " . $columns[0] . " ASC
+                sort_name ASC
         ";
 
         if ($debugLogging) {
